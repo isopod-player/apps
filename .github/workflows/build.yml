@@ -1,0 +1,32 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  list:
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      apps: ${{ steps.apps.outputs.apps }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: apps
+        run: echo "apps=$(ls apps/*/build.sh 2>/dev/null | cut -d/ -f2 | jq -Rcs 'split("\n") | map(select(. != ""))')" >>"$GITHUB_OUTPUT"
+
+  build:
+    needs: list
+    if: needs.list.outputs.apps != '[]'
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.list.outputs.apps) }}
+    steps:
+      - uses: actions/checkout@v6
+      - run: ./build.sh ${{ matrix.app }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.app }}
+          path: dist/${{ matrix.app }}/
