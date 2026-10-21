@@ -7,7 +7,10 @@ storage over the USB cable. What an app folder holds and how isoPod runs it:
 
 ## Apps
 
-None yet.
+- [DCInside](apps/dcinside) (디시인사이드): galleries, posts and their comments.
+- [Hacker News](apps/hackernews): its lists, and a story with its comments as a thread.
+- [Pomodoro](apps/pomodoro) (포모도로): a timer whose screen is its clock face.
+- [YouTube](apps/youtube): search, channels and the videos watched, played in isoPod's player.
 
 ## Install
 
@@ -30,6 +33,11 @@ silicon or an arm64 Linux machine. It writes `dist/<app>/` and `dist/<app>.zip`.
 installs what it needs with apt, builds, and leaves `app.json` and everything the app runs
 from in that folder. Bookworm's glibc (2.36) is older than the device's (2.44), so its
 programs run there; libraries the device lacks go in the app's `lib/`.
+
+Two kinds of app share their making: [lagrange/](lagrange) builds Lagrange and serves a
+website to it as Gemini, for an app that reads a site (DCInside, Hacker News), and
+[ytdlp/](ytdlp) brings yt-dlp, for a list app that plays from YouTube (YouTube).
+An app's `build.sh` runs the shared one, then adds its own module.
 
 ## Licence
 
