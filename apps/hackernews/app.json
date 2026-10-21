@@ -1,0 +1,10 @@
+{
+  "name": {"en": "Hacker News", "ko": "해커 뉴스"},
+  "exec": ["bin/start"],
+  "awake": 300,
+  "keys": {
+    "up": "up", "down": "down", "left": "pageup", "right": "pagedown",
+    "a": "enter", "b": "backspace", "x": "f2", "y": "f5", "select": "esc",
+    "l1": "ctrl+minus", "r1": "ctrl+equal"
+  }
+}
