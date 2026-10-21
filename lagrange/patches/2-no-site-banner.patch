@@ -1,0 +1,14 @@
+diff --git a/src/ui/documentwidget.c b/src/ui/documentwidget.c
+index f0b61e9..4932de2 100644
+--- a/src/ui/documentwidget.c
++++ b/src/ui/documentwidget.c
+@@ -997,7 +997,8 @@ static void showOrHideInputPrompt_DocumentWidget_(iDocumentWidget *d) {
+ }
+ 
+ static void updateBanner_DocumentWidget_(iDocumentWidget *d) {
+-    setSite_Banner(d->banner, siteText_DocumentWidget_(d), siteIcon_GmDocument(d->view->doc));
++    /* isoPod: no site name over the page, on a screen 480 pixels high. */
++    setSite_Banner(d->banner, siteText_DocumentWidget_(d), 0);
+ }
+ 
+ static void documentWasChanged_DocumentWidget_(iDocumentWidget *d) {

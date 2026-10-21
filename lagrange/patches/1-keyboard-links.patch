@@ -1,0 +1,212 @@
+diff --git a/src/ui/documentview.c b/src/ui/documentview.c
+index 1e16e48..be79f07 100644
+--- a/src/ui/documentview.c
++++ b/src/ui/documentview.c
+@@ -112,6 +112,7 @@ void init_DocumentView(iDocumentView *d) {
+     d->hoverAltPre   = NULL;
+     d->hoverLink     = NULL;
+     d->hoverKeyLink  = NULL;
++    d->keyFocusLink  = 0;
+     d->animWideRunId = 0;
+     init_Anim(&d->animWideRunOffset, 0);
+     iZap(d->renderRuns);
+@@ -403,6 +404,33 @@ static void unhover_DocumentView_(iDocumentView *d) {
+ }
+ 
+ void updateHover_DocumentView(iDocumentView *d, iInt2 mouse) {
++    if (d->keyFocusLink) {
++        /* isoPod: there is no mouse. The link Up and Down have moved to is the hovered one
++           for as long as its line is in sight (a picture shown under it does not count). */
++        const iGmRun *oldHoverLink = d->hoverLink;
++        d->hoverLink = d->hoverKeyLink = NULL;
++        iConstForEach(PtrArray, i, &d->visibleLinks) {
++            const iGmRun *run = i.ptr;
++            if (run->linkId == d->keyFocusLink && !isMedia_GmRun(run)) {
++                d->hoverLink = d->hoverKeyLink = run;
++                break;
++            }
++        }
++        if (!d->hoverLink) {
++            d->keyFocusLink = 0;
++        }
++        if (d->hoverLink != oldHoverLink) {
++            if (oldHoverLink) {
++                invalidateLink_DocumentView(d, oldHoverLink->linkId);
++            }
++            if (d->hoverLink) {
++                invalidateLink_DocumentView(d, d->hoverLink->linkId);
++            }
++            updateHoverLinkInfo_DocumentView(d);
++            refresh_Widget(constAs_Widget(d->owner));
++        }
++        return;
++    }
+     const iWidget *w            = constAs_Widget(d->owner);
+     const iRect    docBounds    = documentBounds_DocumentView(d);
+     const iGmRun * oldHoverLink = d->hoverLink;
+@@ -1013,8 +1041,8 @@ static void drawRun_DrawContext_(void *context, const iGmRun *run) {
+                                  runOffset_DocumentView_(d->view, run));
+     const iRect visRect = { visPos, run->visBounds.size };
+     /* Fill the background. */ {
+-        iBool isMobileHover = deviceType_App() != desktop_AppDeviceType &&
+-                              (isPartOfHover || contains_PtrSet(d->view->invalidRuns, run)) &&
++        /* isoPod: the link Up and Down have moved to is marked as a touch is on a phone. */
++        iBool isMobileHover = (isPartOfHover || contains_PtrSet(d->view->invalidRuns, run)) &&
+                               (~run->flags & decoration_GmRunFlag || run->flags & startOfLine_GmRunFlag
+                                /* highlight link icon but not image captions */);
+         /* While this is consistent, it's a bit excessive to indicate that an inlined image
+diff --git a/src/ui/documentview.h b/src/ui/documentview.h
+index 134592a..03b0667 100644
+--- a/src/ui/documentview.h
++++ b/src/ui/documentview.h
+@@ -63,6 +63,7 @@ struct Impl_DocumentView {
+     const iGmRun *  hoverAltPre;     /* for drawing alt text */
+     const iGmRun *  hoverLink;
+     const iGmRun *  hoverKeyLink;    /* hover set via keyboard */
++    iGmLinkId       keyFocusLink;    /* isoPod: the link Up and Down have moved to */
+     iArray          wideRunOffsets;
+     iAnim           animWideRunOffset;
+     uint16_t        animWideRunId;
+diff --git a/src/ui/documentwidget.c b/src/ui/documentwidget.c
+index f7b3686..f0b61e9 100644
+--- a/src/ui/documentwidget.c
++++ b/src/ui/documentwidget.c
+@@ -1095,6 +1095,7 @@ static void releaseViewDocument_DocumentWidget_(iDocumentWidget *d) {
+     cancelInputPrompt_DocumentWidget_(d);
+     iRelease(d->view->doc);
+     d->view->doc = NULL;
++    d->view->keyFocusLink = 0;
+     iChangeFlags(d->flags, viewWasSwipedAway_DocumentWidgetFlag, iFalse);
+ }
+ 
+@@ -3307,6 +3308,77 @@ static const iString *selectedText_DocumentWidget_(const iDocumentWidget *d) {
+     return collect_String(newRange_String(mark));
+ }
+ 
++/* isoPod: with only a D-pad, Up and Down move from link to link, as on a TV. A link cut off
++   at the edge is scrolled into sight; with no link in sight that way, the page scrolls a few
++   lines as the arrow keys usually do. Return opens the link as a click does. */
++static iBool isLinkLine_GmRun_(const iGmRun *run) {
++    return run->linkId && !isMedia_GmRun(run); /* not a picture shown under its link */
++}
++
++static void moveKeyFocus_DocumentWidget_(iDocumentWidget *d, int dir) {
++    iDocumentView  *view    = d->view;
++    const iRangei   vis     = visibleRange_DocumentView(view);
++    const iGmLinkId current = view->keyFocusLink;
++    iGmLinkId       target  = 0;
++    iRangei         span    = { 0, 0 };
++    iBool           passed  = (current == 0);
++    const size_t    count   = size_PtrArray(&view->visibleLinks);
++    for (size_t n = 0; n < count; n++) {
++        const iGmRun *run = constAt_PtrArray(&view->visibleLinks, dir > 0 ? n : count - 1 - n);
++        if (!isLinkLine_GmRun_(run)) {
++            continue;
++        }
++        const int top    = run->visBounds.pos.y;
++        const int bottom = top + run->visBounds.size.y;
++        if (target) {
++            if (run->linkId != target) {
++                break;
++            }
++            span.start = iMin(span.start, top);
++            span.end   = iMax(span.end, bottom);
++            continue;
++        }
++        if (run->linkId == current) {
++            passed = iTrue;
++            continue;
++        }
++        if (!passed || (!current && (dir > 0 ? top < vis.start : bottom > vis.end))) {
++            continue; /* before the focus, or cut off where we come from */
++        }
++        target = run->linkId;
++        span   = (iRangei){ top, bottom };
++    }
++    const int duration = smoothDuration_DocumentWidget_(keyboard_ScrollType);
++    if (!target) {
++        smoothScroll_DocumentView(view, dir * 3 * lineHeight_Text(paragraph_FontId), duration);
++        return;
++    }
++    const int margin = lineHeight_Text(paragraph_FontId) / 2;
++    view->keyFocusLink = target;
++    if (span.end > vis.end) {
++        smoothScroll_DocumentView(view, span.end - vis.end + margin, duration);
++    }
++    else if (span.start < vis.start) {
++        smoothScroll_DocumentView(view, span.start - vis.start - margin, duration);
++    }
++    updateHover_DocumentView(view, zero_I2());
++}
++
++/* The focused link's text in sight, where a click opens it. */
++static const iGmRun *keyFocusRun_DocumentWidget_(const iDocumentWidget *d) {
++    const iGmRun *found = NULL;
++    iConstForEach(PtrArray, i, &d->view->visibleLinks) {
++        const iGmRun *run = i.ptr;
++        if (d->view->keyFocusLink && run->linkId == d->view->keyFocusLink && isLinkLine_GmRun_(run)) {
++            found = run;
++            if (~run->flags & decoration_GmRunFlag) {
++                break;
++            }
++        }
++    }
++    return found;
++}
++
+ static iBool handleCommand_DocumentWidget_(iDocumentWidget *d, const char *cmd) {
+     iWidget *w = as_Widget(d);
+     if (equal_Command(cmd, "document.openurls.changed")) {
+@@ -4250,6 +4322,10 @@ static iBool handleCommand_DocumentWidget_(iDocumentWidget *d, const char *cmd)
+         refresh_Widget(w);
+         return iTrue;
+     }
++    else if (equal_Command(cmd, "document.keyfocus") && document_App() == d) {
++        moveKeyFocus_DocumentWidget_(d, arg_Command(cmd));
++        return iTrue;
++    }
+     else if (equal_Command(cmd, "scroll.step") && document_App() == d) {
+         const int dir = arg_Command(cmd);
+         if (dir > 0 && !argLabel_Command(cmd, "repeat") &&
+@@ -5126,6 +5202,25 @@ static iBool processEvent_DocumentWidget_(iDocumentWidget *d, const SDL_Event *e
+             }
+         }
+         switch (key) {
++            case SDLK_RETURN:
++            case SDLK_KP_ENTER:
++                /* isoPod: Return clicks the link Up and Down have moved to, or moves to the
++                   first one in sight. */
++                if (!keyMods_Sym(ev->key.keysym.mod) && !focus_Widget() && document_App() == d) {
++                    const iGmRun *run = keyFocusRun_DocumentWidget_(d);
++                    if (run) {
++                        emulateMouseClickPos_Widget(
++                            w, SDL_BUTTON_LEFT,
++                            mid_Rect(moved_Rect(run->visBounds,
++                                                addY_I2(topLeft_Rect(documentBounds_DocumentView(view)),
++                                                        viewPos_DocumentView(view)))));
++                    }
++                    else {
++                        moveKeyFocus_DocumentWidget_(d, +1);
++                    }
++                    return iTrue;
++                }
++                break;
+             case SDLK_ESCAPE:
+                 if (d->flags & showLinkNumbers_DocumentWidgetFlag && document_App() == d) {
+                     setLinkNumberMode_DocumentWidget_(d, iFalse);
+diff --git a/src/ui/keys.c b/src/ui/keys.c
+index 76f16d6..c0cd3a9 100644
+--- a/src/ui/keys.c
++++ b/src/ui/keys.c
+@@ -203,8 +203,9 @@ enum iBindFlag {
+ static const struct { int id; iMenuItem bind; int flags; } defaultBindings_[] = {
+     { 1,  { "${LC:keys.top}",               SDLK_HOME, 0,                   "scroll.top"                        }, 0 },
+     { 2,  { "${LC:keys.bottom}",            SDLK_END, 0,                    "scroll.bottom"                     }, 0 },
+-    { 10, { "${keys.scroll.up}",            SDLK_UP, 0,                     "scroll.step arg:-1"                }, argRepeat_BindFlag },
+-    { 11, { "${keys.scroll.down}",          SDLK_DOWN, 0,                   "scroll.step arg:1"                 }, argRepeat_BindFlag },
++    /* isoPod: Up and Down go from link to link, scrolling where there is none. */
++    { 10, { "${keys.scroll.up}",            SDLK_UP, 0,                     "document.keyfocus arg:-1"          }, argRepeat_BindFlag },
++    { 11, { "${keys.scroll.down}",          SDLK_DOWN, 0,                   "document.keyfocus arg:1"           }, argRepeat_BindFlag },
+     { 22, { "${keys.scroll.halfpage.up}",   SDLK_SPACE, KMOD_SHIFT,         "scroll.page arg:-1"                }, argRepeat_BindFlag },
+     { 23, { "${keys.scroll.halfpage.down}", SDLK_SPACE, 0,                  "scroll.page arg:1"                 }, argRepeat_BindFlag },
+     { 24, { "${keys.scroll.page.up}",       SDLK_PAGEUP, 0,                 "scroll.page arg:-1 full:1"         }, argRepeat_BindFlag },

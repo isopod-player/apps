@@ -1,0 +1,35 @@
+diff --git a/src/ui/documentwidget.c b/src/ui/documentwidget.c
+index 4932de2..0b0db7e 100644
+--- a/src/ui/documentwidget.c
++++ b/src/ui/documentwidget.c
+@@ -3309,6 +3309,17 @@ static const iString *selectedText_DocumentWidget_(const iDocumentWidget *d) {
+     return collect_String(newRange_String(mark));
+ }
+ 
++/* isoPod: whether the page is one of those bookmarked as the start page. */
++static iBool isHomepage_DocumentWidget_(const iDocumentWidget *d) {
++    iConstForEach(PtrArray, i, list_Bookmarks(bookmarks_App(), NULL, filterHomepage_Bookmark, NULL)) {
++        const iBookmark *bm = i.ptr;
++        if (!cmpStringCase_String(d->mod.url, &bm->url)) {
++            return iTrue;
++        }
++    }
++    return iFalse;
++}
++
+ /* isoPod: with only a D-pad, Up and Down move from link to link, as on a TV. A link cut off
+    at the edge is scrolled into sight; with no link in sight that way, the page scrolls a few
+    lines as the arrow keys usually do. Return opens the link as a click does. */
+@@ -4162,6 +4173,12 @@ static iBool handleCommand_DocumentWidget_(iDocumentWidget *d, const char *cmd)
+         return iTrue;
+     }
+     else if (equal_Command(cmd, "navigate.back") && document_App() == d) {
++        /* isoPod: Back on the start page, or with nothing left to go back to, ends the app,
++           as Back does on a phone. */
++        if (!d->request && (atOldest_History(d->mod.history) || isHomepage_DocumentWidget_(d))) {
++            postCommand_App("quit");
++            return iTrue;
++        }
+         const iBool wasCancelled = cancelRequest_DocumentWidget_(d, iFalse);
+         if (!goBack_History(d->mod.history)) {
+             /* No document will be arriving, so nothing would ever end the animation or

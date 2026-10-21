@@ -1,0 +1,17 @@
+--- a/src/media.c
++++ b/src/media.c
+@@ -186,9 +186,11 @@
+         /* Resize down to min(maximum texture size, window size). */ {
+             SDL_Rect dispRect;
+             SDL_GetDisplayBounds(SDL_GetWindowDisplayIndex(window->win), &dispRect);
+-            const iInt2 maxSize = min_I2(isEqual_I2(maxTextureSize_Window(window), zero_I2()) ?
+-                                         texSize : maxTextureSize_Window(window),
+-                                         coord_Window(window, dispRect.w, dispRect.h));
++            iInt2 maxSize = isEqual_I2(maxTextureSize_Window(window), zero_I2()) ?
++                            texSize : maxTextureSize_Window(window);
++            /* isoPod: a picture is drawn as wide as the page, so only its width is held to the
++               screen's. Held to a 640x480 screen's height too, a tall one is squeezed to a sliver. */
++            maxSize.x = iMin(maxSize.x, coord_Window(window, dispRect.w, dispRect.h).x);
+             iInt2 scaled = d->size;
+             if (scaled.x > maxSize.x) {
+                 scaled.y = scaled.y * maxSize.x / scaled.x;
