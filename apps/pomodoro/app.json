@@ -1,0 +1,9 @@
+{
+  "name": {"en": "Pomodoro", "ko": "포모도로"},
+  "exec": ["bin/pomodoro"],
+  "awake": 0,
+  "keys": {
+    "a": "enter", "b": "esc", "x": "backspace", "y": "s",
+    "left": "left", "right": "right", "up": "up", "down": "down"
+  }
+}
