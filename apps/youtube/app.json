@@ -1,0 +1,5 @@
+{
+  "name": {"en": "YouTube", "ko": "유튜브"},
+  "kind": "list",
+  "exec": ["python3", "youtube.py"]
+}
