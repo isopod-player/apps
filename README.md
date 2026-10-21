@@ -1,9 +1,9 @@
 # isoPod apps
 
-Apps for [isoPod](https://github.com/hypulse/isopod), the iPod-like system for the Anbernic
+Apps for [isoPod](https://github.com/isopod-player/isopod), the iPod-like system for the Anbernic
 RG35XX SP. Each folder in `apps/` builds into a folder that goes into the device's `Apps`
 storage over the USB cable. What an app folder holds and how isoPod runs it:
-[docs/apps.md](https://github.com/hypulse/isopod/blob/isopod/isopod/docs/apps.md).
+[docs/apps.md](https://github.com/isopod-player/isopod/blob/isopod/isopod/docs/apps.md).
 
 ## Apps
 
