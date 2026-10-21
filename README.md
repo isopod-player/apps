@@ -10,7 +10,8 @@ storage over the USB cable. What an app folder holds and how isoPod runs it:
 - [DCInside](apps/dcinside) (디시인사이드): galleries, posts and their comments.
 - [Hacker News](apps/hackernews): its lists, and a story with its comments as a thread.
 - [Pomodoro](apps/pomodoro) (포모도로): a timer whose screen is its clock face.
-- [YouTube](apps/youtube): search, channels and the videos watched, played in isoPod's player.
+- [YouTube](apps/youtube): search, channels, the videos watched and saved, played in isoPod's
+  player.
 
 ## Install
 

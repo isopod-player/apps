@@ -1,18 +1,22 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """What isoPod's list apps that play from YouTube share: yt-dlp, loaded once and in the
-background, the questions-and-answers loop isoPod talks with, the app's kept state, and
-fetching a newer yt-dlp.
+background, the questions-and-answers loop isoPod talks with, the app's kept state,
+fetching a newer yt-dlp, and saving videos to watch without the network.
 
-An app (youtube.py) lies beside this, with yt-dlp's zipimport release in
-share/yt-dlp and QuickJS-NG's qjs in bin/, as ytdlp/build.sh leaves them. It answers isoPod
-on stdout, one JSON line each, and ends when stdin closes; anything else it would print
-goes to stderr, which is isopodd's log.
+An app (youtube.py) lies beside this, with yt-dlp's zipimport release in share/yt-dlp and
+QuickJS-NG's qjs and FFmpeg's ffmpeg in bin/, as ytdlp/build.sh leaves them. It answers
+isoPod on stdout, one JSON line each, and ends when stdin closes; anything else it would
+print goes to stderr, which is isopodd's log.
 """
 
+import contextlib
+import fcntl
+import glob
 import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -24,11 +28,21 @@ DATA = os.environ.get("ISOPOD_APP_DATA") or os.path.expanduser("~")
 BUNDLED = os.path.join(APP, "share", "yt-dlp")
 UPDATED = os.path.join(DATA, "yt-dlp")
 QJS = os.path.join(APP, "bin", "qjs")
+FFMPEG = os.path.join(APP, "bin", "ffmpeg")
+VIDEOS = "/storage/videos"  # isoPod's Videos
 RELEASES = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/"
-# A 640x480 screen: up to 480p, H.264 where there is a choice (the CPU decodes it), and
-# AAC beside it. A live stream comes whole, as HLS.
-FORMAT = ("bv*[height<=480][vcodec^=avc1]+ba[acodec^=mp4a]/b[height<=480][vcodec^=avc1]/"
-          "bv*[height<=480]+ba/b[height<=480]/b")
+WATCH = "https://www.youtube.com/watch?v="
+HEIGHTS = (360, 480, 720, 1080)
+HEIGHT = 480  # the screen's 640x480
+
+
+def formats(height, only=""):
+    """Up to that height, H.264 where there is a choice (the CPU decodes it) with AAC beside
+    it; `only` narrows every choice, as to what can be saved."""
+    h = f"[height<={height}]{only}"
+    return "/".join((f"bv*{h}[vcodec^=avc1]+ba[acodec^=mp4a]{only}", f"b{h}[vcodec^=avc1]",
+                     f"bv*{h}+ba{only}", f"b{h}", f"b{only}"))
+
 
 TEXT = {
     "ko": {"update": "yt-dlp 새로 받기", "latest": "yt-dlp {v}, 가장 새것입니다.",
@@ -164,13 +178,21 @@ class Library:
         with self.ydl(lang, extract_flat="in_playlist", playlist_items=f"{first}-{last}") as y:
             return extract(y, url)
 
-    def streams(self, video_id, lang):
-        with self.ydl(lang, format=FORMAT) as y:
-            return extract(y, "https://www.youtube.com/watch?v=" + video_id)
+    def about(self, video_id, lang):
+        """A video's title, channel and the like, without picking its streams."""
+        with self.ydl(lang) as y:
+            try:
+                return y.extract_info(WATCH + video_id, download=False, process=False)
+            except Exception as e:
+                return extract_failed(WATCH + video_id, e)
 
-    def play(self, video_id, lang):
+    def streams(self, video_id, lang, height=HEIGHT):
+        with self.ydl(lang, format=formats(height)) as y:
+            return extract(y, WATCH + video_id)
+
+    def play(self, video_id, lang, height=HEIGHT):
         """isoPod's answer for a video: the picture, the sound beside it, and the headers."""
-        info = self.streams(video_id, lang)
+        info = self.streams(video_id, lang, height)
         chosen = info.get("requested_formats") or [info]
         video = next((f for f in chosen if f.get("vcodec") not in (None, "none")), chosen[0])
         audio = next((f for f in chosen if f is not video and f.get("acodec") not in (None, "none")), None)
@@ -185,12 +207,16 @@ def extract(y, url):
     try:
         return y.extract_info(url, download=False)
     except Exception as e:
-        message = str(e)
-        for words, key in TROUBLE:
-            if words.lower() in message.lower():
-                raise Trouble(key) from None
-        print("ytlib:", url, message, file=sys.stderr)
-        raise Trouble("unavailable") from None
+        return extract_failed(url, e)
+
+
+def extract_failed(url, e):
+    message = str(e)
+    for words, key in TROUBLE:
+        if words.lower() in message.lower():
+            raise Trouble(key) from None
+    print("ytlib:", url, message, file=sys.stderr)
+    raise Trouble("unavailable") from None
 
 
 def videos(result):
@@ -223,6 +249,180 @@ def update(library, lang):
         return page(t["latest"].format(v=library.version))
     os.replace(UPDATED + ".part", UPDATED)
     return page(t["updated"].format(v=version))
+
+
+# --- Saved videos --------------------------------------------------------------------------
+
+class Saves:
+    """Videos saved to watch without the network: in a folder of isoPod's Videos, so they
+    are there and over the cable too. A process of its own does the saving (the app run with
+    --save, calling work()), since isoPod stops a list app nobody asks anything of for five
+    minutes; it leaves that process alone. The two share the list in saved.json, each
+    changing it under a lock. An entry is the video's id, title, channel and length, the
+    height asked for, and how it is going: waiting, saving (with percent), done (with file
+    and size) or failed."""
+
+    def __init__(self, folder):
+        self.folder = os.path.join(VIDEOS, folder) if os.path.isdir(VIDEOS) else os.path.join(DATA, "videos")
+        self.path = os.path.join(DATA, "saved.json")
+        self.worker = None
+
+    def _read(self):
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                found = json.load(f)
+        except (OSError, ValueError):
+            return []
+        return [e for e in found if isinstance(e, dict) and e.get("id")] if isinstance(found, list) else []
+
+    @contextlib.contextmanager
+    def edit(self):
+        """The list, written back when changed."""
+        os.makedirs(DATA, exist_ok=True)
+        with open(self.path + ".lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            entries = self._read()
+            before = json.dumps(entries)
+            yield entries
+            if json.dumps(entries) != before:
+                with open(self.path + ".part", "w", encoding="utf-8") as f:
+                    json.dump(entries, f, ensure_ascii=False, indent=1)
+                os.replace(self.path + ".part", self.path)
+
+    def all(self):
+        """Newest first; one whose file has gone (taken off over the cable, say) is let go."""
+        entries = self._read()
+        if any(e.get("state") == "done" and not os.path.exists(e.get("file") or "") for e in entries):
+            with self.edit() as entries:
+                entries[:] = [e for e in entries
+                              if e.get("state") != "done" or os.path.exists(e.get("file") or "")]
+        return entries
+
+    def get(self, video_id):
+        return next((e for e in self.all() if e["id"] == video_id), None)
+
+    def add(self, about, height, lang):
+        """Save a video, unless it is saved or on its way already: what it was before."""
+        with self.edit() as entries:
+            found = next((e for e in entries if e["id"] == about["id"]), None)
+            if found and found.get("state") != "failed":
+                return found
+            entries[:] = [e for e in entries if e["id"] != about["id"]]
+            entries.insert(0, {**about, "height": height, "lang": lang, "state": "waiting", "percent": 0})
+        self.wake()
+        return found
+
+    def drop(self, video_id):
+        """Stop saving a video, or delete it once saved: what it was."""
+        with self.edit() as entries:
+            found = next((e for e in entries if e["id"] == video_id), None)
+            entries[:] = [e for e in entries if e["id"] != video_id]
+        if found and found.get("state") != "saving":  # the saving process tidies up after itself
+            self.clean(video_id)
+        return found
+
+    def clean(self, video_id):
+        """A video's file, and the parts of one being saved."""
+        for path in glob.glob(os.path.join(glob.escape(self.folder), "*" + glob.escape(f"[{video_id}]") + "*")):
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+
+    def wake(self):
+        """Start the saving process, when something waits and none is at it."""
+        if self.worker and self.worker.poll() is None:
+            return
+        if not any(e.get("state") in ("waiting", "saving") for e in self._read()) or self._busy():
+            return
+        with open(os.path.join(DATA, "saving.log"), "w") as log:
+            self.worker = subprocess.Popen(
+                [sys.executable, os.path.abspath(sys.argv[0]), "--save"], cwd=APP, start_new_session=True,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log)
+
+    def _busy(self):
+        with open(os.path.join(DATA, "saving.lock"), "w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            return False
+
+    def work(self):
+        """The saving process: one video after another, the oldest first, until none waits."""
+        os.makedirs(DATA, exist_ok=True)
+        held = open(os.path.join(DATA, "saving.lock"), "w")
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return  # another is at it
+        library = Library()
+        with self.edit() as entries:
+            for e in entries:
+                if e.get("state") == "saving":  # left by one that was stopped
+                    e["state"] = "waiting"
+        while True:
+            with self.edit() as entries:
+                job = next((e for e in reversed(entries) if e.get("state") == "waiting"), None)
+                if job is None:
+                    held.close()  # with the list locked: what is added from now on starts another
+                    return
+                job.update(state="saving", percent=0)
+                job = dict(job)
+            try:
+                file, height = self._save(library, job)
+            except Exception as e:
+                cancelled = library.module and isinstance(e, library.module.utils.DownloadCancelled)
+                if not cancelled:
+                    print("ytlib: saving", job["id"], repr(e), file=sys.stderr)
+                with self.edit() as entries:
+                    for entry in entries:
+                        if entry["id"] == job["id"] and entry.get("state") == "saving":
+                            entry["state"] = "failed"
+                if cancelled:
+                    self.clean(job["id"])
+                continue
+            with self.edit() as entries:
+                entry = next((e for e in entries if e["id"] == job["id"] and e.get("state") == "saving"), None)
+                if entry:
+                    entry.update(state="done", percent=100, file=file, size=os.path.getsize(file),
+                                 height=height or entry.get("height"))
+            if not entry:  # let go of while it was being put together
+                self.clean(job["id"])
+
+    def _save(self, library, job):
+        """One video into the folder, as one MP4 file: its path and height."""
+        os.makedirs(self.folder, exist_ok=True)
+        total, got, shown = [0], {}, [time.monotonic()]
+
+        def progress(d):
+            if d.get("status") not in ("downloading", "finished"):
+                return
+            got[d.get("filename")] = d.get("downloaded_bytes") or d.get("total_bytes") or 0
+            if time.monotonic() - shown[0] < 2:
+                return
+            shown[0] = time.monotonic()
+            with self.edit() as entries:
+                entry = next((e for e in entries if e["id"] == job["id"]), None)
+                if not entry or entry.get("state") != "saving":
+                    raise library.module.utils.DownloadCancelled("let go of")
+                if total[0]:
+                    entry["percent"] = min(99, int(100 * sum(got.values()) / total[0]))
+
+        options = {"format": formats(job.get("height") or HEIGHT, "[protocol=https]"),
+                   "merge_output_format": "mp4", "windowsfilenames": True,
+                   "outtmpl": os.path.join(self.folder, "%(title).80B [%(id)s].%(ext)s"),
+                   "progress_hooks": [progress], "retries": 10, "noprogress": True}
+        if os.path.exists(FFMPEG):
+            options["ffmpeg_location"] = FFMPEG
+        with library.ydl(job.get("lang") or "en", **options) as y:
+            info = extract(y, WATCH + job["id"])
+            total[0] = sum(f.get("filesize") or f.get("filesize_approx") or 0
+                           for f in info.get("requested_formats") or [info])
+            info = y.process_ie_result(info, download=True)
+        file = ((info.get("requested_downloads") or [{}])[0].get("filepath") or info.get("filepath") or
+                y.prepare_filename(info))
+        if not os.path.exists(file):
+            raise OSError("no file after saving")
+        return file, info.get("height")
 
 
 # --- Words -------------------------------------------------------------------------------
