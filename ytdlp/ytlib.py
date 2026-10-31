@@ -195,7 +195,7 @@ class Library:
         info = self.streams(video_id, lang, height)
         chosen = info.get("requested_formats") or [info]
         video = next((f for f in chosen if f.get("vcodec") not in (None, "none")), chosen[0])
-        audio = next((f for f in chosen if f is not video and f.get("acodec") not in (None, "none")), None)
+        audio = next((f for f in chosen if f is not video), None)  # a live stream's sound names no codec
         answer = {"url": video["url"], "title": info.get("title") or video_id,
                   "headers": video.get("http_headers") or info.get("http_headers") or {}}
         if audio:
